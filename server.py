@@ -86,32 +86,35 @@ def send_error(req_id, code, message):
 
 # --- .emmx parser ---
 
-def extract_text_from_page_bin(data: bytes) -> list[str]:
-    """Extract text nodes from EdrawMind page.bin binary format.
+def _is_meaningful_text(text: str) -> bool:
+    """Check if extracted text is meaningful content (not binary noise)."""
+    if len(text) < 2:
+        return False
+    if all(c in "0123456789abcdefABCDEF#.,;: ()" for c in text):
+        return False
+    has_cjk = any(
+        0x3000 <= ord(c) <= 0x9FFF
+        or 0xF900 <= ord(c) <= 0xFAFF
+        or 0xFF00 <= ord(c) <= 0xFFEF
+        or 0xAC00 <= ord(c) <= 0xD7AF  # Korean
+        for c in text
+    )
+    has_meaningful_ascii = len(text) >= 5 and any(c.isalpha() for c in text)
+    return has_cjk or has_meaningful_ascii
 
-    The page.bin file uses a custom binary format. Text content is stored as
-    UTF-8 strings, which we extract by scanning for valid UTF-8 sequences
-    that contain meaningful characters (CJK, Latin, etc.).
-    """
+
+def extract_text_from_page_bin(data: bytes) -> list[str]:
+    """Extract text nodes from EdrawMind page.bin binary format (legacy)."""
     texts = []
     i = 0
     while i < len(data):
         if data[i] >= 0x80 or (0x20 <= data[i] < 0x7F):
-            for end in range(min(i + 1000, len(data)), i + 1, -1):
+            for end in range(min(i + 2000, len(data)), i + 1, -1):
                 try:
                     s = data[i:end].decode("utf-8")
                     clean = "".join(c for c in s if ord(c) >= 32)
-                    has_cjk = any(
-                        0x3000 <= ord(c) <= 0x9FFF
-                        or 0xF900 <= ord(c) <= 0xFAFF
-                        or 0xFF00 <= ord(c) <= 0xFFEF
-                        or 0xAC00 <= ord(c) <= 0xD7AF  # Korean
-                        for c in clean
-                    )
-                    has_meaningful_ascii = len(clean) >= 5 and any(c.isalpha() for c in clean)
-                    if (has_cjk or has_meaningful_ascii) and len(clean) >= 2:
-                        if not all(c in "0123456789abcdefABCDEF#.,;: ()" for c in clean):
-                            texts.append(clean.strip())
+                    if _is_meaningful_text(clean):
+                        texts.append(clean.strip())
                         i = end
                         break
                 except Exception:
@@ -121,6 +124,70 @@ def extract_text_from_page_bin(data: bytes) -> list[str]:
         else:
             i += 1
     return texts
+
+
+def extract_structured_nodes(data: bytes) -> list[dict]:
+    """Extract structured node data from page.bin including labels and notes.
+
+    Field numbers vary by theme, but follow a consistent pattern:
+    - Root label: fields 122-123
+    - Branch/leaf labels: fields 126-131
+    - Note/annotation text: fields 132-134
+    - Floating topics / note refs: field 135
+    - Hyperlinks detected by 'http' prefix
+    """
+    nodes = []
+    current_node = None
+
+    # Known label fields (vary by theme/version offset)
+    LABEL_FIELDS = {122, 123, 126, 128, 131}
+    NOTE_FIELDS = {132, 134}
+    REF_FIELDS = {135}
+    ALL_FIELDS = LABEL_FIELDS | NOTE_FIELDS | REF_FIELDS
+
+    i = 0
+    while i < len(data) - 4:
+        if data[i] == 0x04 and i >= 3:
+            field_num = None
+
+            if data[i - 2] == 0x02:
+                field_num = data[i - 1]
+            elif i >= 4 and data[i - 3] == 0x02:
+                field_num = (data[i - 2] & 0x7F) | (data[i - 1] << 7)
+
+            if field_num is not None and field_num in ALL_FIELDS:
+                end = data.find(b"\x00", i + 1)
+                if end > i + 1 and end - i < 5000:
+                    try:
+                        text = data[i + 1 : end].decode("utf-8")
+                        clean = "".join(c for c in text if ord(c) >= 32).strip()
+                    except Exception:
+                        i += 1
+                        continue
+
+                    if not clean:
+                        i = end + 1
+                        continue
+
+                    if field_num in LABEL_FIELDS and _is_meaningful_text(clean):
+                        current_node = {"label": clean, "type": "node", "notes": [], "links": []}
+                        nodes.append(current_node)
+                    elif field_num in NOTE_FIELDS and current_node and _is_meaningful_text(clean):
+                        current_node["notes"].append(clean)
+                    elif field_num in REF_FIELDS:
+                        if clean.startswith("http") and current_node:
+                            current_node["links"].append(clean)
+                        elif _is_meaningful_text(clean):
+                            current_node = {"label": clean, "type": "node", "notes": [], "links": []}
+                            nodes.append(current_node)
+                    elif clean.startswith("http") and current_node:
+                        current_node["links"].append(clean)
+
+                    i = end + 1
+                    continue
+        i += 1
+
+    return nodes
 
 
 def read_emmx(filepath: str) -> dict:
@@ -151,16 +218,23 @@ def read_emmx(filepath: str) -> dict:
 
             for pf in (n for n in names if n.endswith("page.bin")):
                 page_data = zf.read(pf)
-                texts = extract_text_from_page_bin(page_data)
-                clean_texts = []
-                for t in texts:
-                    t = t.strip()
-                    while t and t[0] in '#!$=<>|\\':
-                        t = t[1:]
-                    t = t.strip()
-                    if len(t) >= 2:
-                        clean_texts.append(t)
-                result["pages"].append({"file": pf, "nodes": clean_texts})
+
+                # Structured extraction (with notes, links)
+                structured = extract_structured_nodes(page_data)
+                if structured:
+                    result["pages"].append({"file": pf, "structured_nodes": structured})
+                else:
+                    # Fallback to legacy text extraction
+                    texts = extract_text_from_page_bin(page_data)
+                    clean_texts = []
+                    for t in texts:
+                        t = t.strip()
+                        while t and t[0] in '#!$=<>|\\':
+                            t = t[1:]
+                        t = t.strip()
+                        if len(t) >= 2:
+                            clean_texts.append(t)
+                    result["pages"].append({"file": pf, "nodes": clean_texts})
 
             media = [n for n in names if n.startswith("media/")]
             if media:
@@ -271,8 +345,19 @@ def handle_read_mindmap(args: dict) -> str:
     ]
     for page in result["pages"]:
         output.append("## Content")
-        for node in page["nodes"]:
-            output.append(f"- {node}")
+        if "structured_nodes" in page:
+            for node in page["structured_nodes"]:
+                label = node["label"]
+                ntype = node.get("type", "")
+                prefix = {"root": "# ", "branch": "## ", "leaf": "- ", "node": "- "}.get(ntype, "- ")
+                output.append(f"{prefix}{label}")
+                for note in node.get("notes", []):
+                    output.append(f"  > {note}")
+                for link in node.get("links", []):
+                    output.append(f"  [link]({link})")
+        else:
+            for node in page.get("nodes", []):
+                output.append(f"- {node}")
     if result.get("media_files"):
         output.append(f"\n## Media: {len(result['media_files'])} embedded images")
     return "\n".join(output)

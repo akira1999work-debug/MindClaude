@@ -360,12 +360,131 @@ def handle_add_to_mindmap(args: dict) -> str:
     return "\n".join(lines)
 
 
+def handle_generate_plan(args: dict) -> str:
+    period = args.get("period", "weekly")
+    source = args.get("source", "")
+    tasks_json = args.get("tasks", "")
+    open_in_app = args.get("open_in_app", True)
+
+    # Determine period label and date range
+    now = datetime.now()
+    if period == "monthly":
+        period_label = now.strftime("%Y年%m月")
+        safe_name = now.strftime("%Y%m_plan")
+    else:
+        # Weekly: Monday to Sunday
+        from datetime import timedelta
+        monday = now - timedelta(days=now.weekday())
+        sunday = monday + timedelta(days=6)
+        period_label = f"{monday.strftime('%m/%d')}〜{sunday.strftime('%m/%d')}"
+        safe_name = monday.strftime("%Y%m%d_weekly")
+
+    # If source mindmap specified, read it (using clean text extraction)
+    source_nodes = []
+    source_name = ""
+    if source:
+        for f in find_emmx_files():
+            if source.lower() in f["name"].lower():
+                source_name = f["name"]
+                result = read_emmx(f["path"])
+                if "error" not in result:
+                    for page in result.get("pages", []):
+                        for node in page["nodes"]:
+                            # Filter out binary noise
+                            clean = node.strip()
+                            if len(clean) >= 2 and any(
+                                '\u3000' <= c <= '\u9fff' or c.isalpha() for c in clean
+                            ):
+                                source_nodes.append(clean)
+                break
+
+    # Parse tasks JSON if provided
+    categories: dict[str, list[dict]] = {}
+    if tasks_json:
+        try:
+            tasks = json.loads(tasks_json) if isinstance(tasks_json, str) else tasks_json
+            for task in tasks:
+                cat = task.get("category", "その他")
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(task)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Build markdown with template structure
+    lines = [f"# {period_label} プラン"]
+
+    if categories:
+        for cat, tasks in categories.items():
+            lines.append(f"## {cat}")
+            for task in tasks:
+                name = task.get("name", "")
+                deadline = task.get("deadline", "")
+                priority = task.get("priority", "")
+                notes = task.get("notes", "")
+
+                # Build task line with deadline and priority markers
+                task_line = f"### {name}"
+                lines.append(task_line)
+
+                if deadline:
+                    lines.append(f"#### 〆 {deadline}")
+                if priority:
+                    priority_mark = {"high": "優先度：高", "medium": "優先度：中", "low": "優先度：低"}.get(priority, priority)
+                    lines.append(f"#### {priority_mark}")
+                if notes:
+                    lines.append(f"#### {notes}")
+    else:
+        # Empty template
+        lines.extend([
+            "## 最優先（今すぐ）",
+            "### タスク名",
+            "#### 〆 MM/DD",
+            "## プロジェクトA",
+            "### タスク名",
+            "#### 〆 MM/DD",
+            "#### メモ",
+            "## プロジェクトB",
+            "### タスク名",
+            "## 今期中にやりたい",
+            "### タスク名",
+        ])
+
+    if source_nodes:
+        lines.extend(["", f"## 元データ（{source_name}）"])
+        for node in source_nodes[:30]:
+            lines.append(f"### {node}")
+
+    markdown = "\n".join(lines)
+    md_path = os.path.join(tempfile.gettempdir(), f"{safe_name}.md")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(markdown)
+
+    result_lines = [
+        f"Generated {period} plan: {period_label}",
+        f"Markdown saved to: {md_path}",
+    ]
+
+    if open_in_app:
+        if _open_in_edrawmind(md_path):
+            result_lines.append("EdrawMind is opening the plan.")
+        else:
+            result_lines.append("Please open this file manually in EdrawMind.")
+
+    if source_nodes:
+        result_lines.append(f"\nSource mind map '{source_name}' content was included for reference.")
+
+    return "\n".join(result_lines)
+
+
 TOOL_HANDLERS = {
     "list_mindmaps": handle_list_mindmaps,
     "read_mindmap": handle_read_mindmap,
     "search_mindmaps": handle_search_mindmaps,
     "create_mindmap": handle_create_mindmap,
     "add_to_mindmap": handle_add_to_mindmap,
+    "generate_plan": handle_generate_plan,
 }
 
 TOOL_DEFINITIONS = [
@@ -419,6 +538,33 @@ TOOL_DEFINITIONS = [
                 "markdown": {"type": "string", "description": "Full merged markdown content"},
             },
             "required": ["name", "markdown"],
+        },
+    },
+    {
+        "name": "generate_plan",
+        "description": "Generate a weekly or monthly plan mind map with structured categories, deadlines, and priorities. Can read an existing mind map as source and reorganize it. Tasks are provided as a JSON array with fields: name, category, deadline, priority (high/medium/low), notes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "enum": ["weekly", "monthly"],
+                    "description": "Plan period: weekly or monthly",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Optional: existing mind map name to read and reorganize",
+                },
+                "tasks": {
+                    "type": "string",
+                    "description": 'JSON array of tasks. Each task: {"name": "...", "category": "...", "deadline": "MM/DD", "priority": "high|medium|low", "notes": "..."}',
+                },
+                "open_in_app": {
+                    "type": "boolean",
+                    "description": "Open in EdrawMind (default: true)",
+                },
+            },
+            "required": ["period"],
         },
     },
 ]

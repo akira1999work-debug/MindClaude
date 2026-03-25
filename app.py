@@ -19,13 +19,25 @@ INDEX_HTML = Path(__file__).parent / "index.html"
 
 
 def emmx_to_mindmap(filepath: str) -> dict:
-    """Convert .emmx file to MindClaude JSON format."""
+    """Convert .emmx file to MindClaude JSON format with hierarchy recovery.
+
+    EdrawMind's page.bin stores nodes in document order. The first node is the
+    root, and subsequent nodes are branches/leaves. Since the binary format
+    doesn't encode parent-child relationships explicitly, we use heuristics:
+    - Field 122-123 = root label
+    - Field 126-131 = branch/leaf labels (depth not encoded)
+
+    Strategy: treat the first node as root, and group subsequent nodes into
+    branches. When a node's label looks like a main topic (short, no notes),
+    start a new branch. Nodes with notes or longer labels become children
+    of the current branch.
+    """
     result = read_emmx(filepath)
     if "error" in result:
         return {"error": result["error"]}
 
     nodes = {}
-    node_ids = []
+    all_items = []  # (nid, label, note_text)
 
     for page in result.get("pages", []):
         structured = page.get("structured_nodes", [])
@@ -33,11 +45,12 @@ def emmx_to_mindmap(filepath: str) -> dict:
             # Fallback: use flat node list
             for text in page.get("nodes", []):
                 nid = str(uuid.uuid4())[:8]
+                note_text = ""
                 nodes[nid] = {
-                    "id": nid, "label": text, "note": "",
+                    "id": nid, "label": text, "note": note_text,
                     "children": [], "collapsed": False,
                 }
-                node_ids.append(nid)
+                all_items.append((nid, text, note_text))
             continue
 
         for sn in structured:
@@ -50,9 +63,9 @@ def emmx_to_mindmap(filepath: str) -> dict:
                 "id": nid, "label": sn["label"], "note": note_text,
                 "children": [], "collapsed": False,
             }
-            node_ids.append(nid)
+            all_items.append((nid, sn["label"], note_text))
 
-    if not node_ids:
+    if not all_items:
         root_id = str(uuid.uuid4())[:8]
         nodes[root_id] = {
             "id": root_id, "label": Path(filepath).stem, "note": "",
@@ -60,10 +73,34 @@ def emmx_to_mindmap(filepath: str) -> dict:
         }
         return {"version": 1, "title": Path(filepath).stem, "nodes": nodes, "rootId": root_id}
 
-    root_id = node_ids[0]
-    # Make remaining nodes children of root
-    for nid in node_ids[1:]:
-        nodes[root_id]["children"].append(nid)
+    # First node = root
+    root_id = all_items[0][0]
+
+    if len(all_items) <= 1:
+        return {"version": 1, "title": Path(filepath).stem, "nodes": nodes, "rootId": root_id}
+
+    # Heuristic hierarchy: short labels without notes = branch topics,
+    # longer labels or labels with notes = children of current branch
+    remaining = all_items[1:]
+
+    # Calculate average label length to detect "branch-level" vs "leaf-level"
+    avg_len = sum(len(item[1]) for item in remaining) / len(remaining) if remaining else 10
+
+    current_branch_id = None
+    for nid, label, note_text in remaining:
+        is_branch = (
+            len(label) <= max(avg_len * 0.7, 15)
+            and not note_text
+            and current_branch_id is not None  # first non-root always becomes branch
+        ) or current_branch_id is None
+
+        if is_branch or current_branch_id is None:
+            # This is a main branch
+            nodes[root_id]["children"].append(nid)
+            current_branch_id = nid
+        else:
+            # This is a child of the current branch
+            nodes[current_branch_id]["children"].append(nid)
 
     return {
         "version": 1,

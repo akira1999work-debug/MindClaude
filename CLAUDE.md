@@ -62,6 +62,7 @@ MindClaude/
   commands/
     start.md         # セッション開始コマンド
     done.md          # セッション終了コマンド
+    slides.md        # マインドマップ→スライド生成スキル
 ```
 
 ## REST API

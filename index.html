@@ -72,6 +72,33 @@ body {
   min-width: 40px; text-align: center;
 }
 
+/* ── Dropdown ── */
+.dropdown {
+  position: relative;
+}
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--toolbar-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  min-width: 200px;
+  padding: 4px 0;
+  z-index: 200;
+}
+.dropdown.open .dropdown-menu { display: block; }
+.dropdown-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px !important;
+  border-radius: 0 !important;
+  font-size: 13px;
+}
+.dropdown-menu button:hover { background: var(--toolbar-hover); }
+
 /* ── Canvas ── */
 #canvas-wrap {
   position: fixed;
@@ -363,6 +390,19 @@ body {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
     Delete
   </button>
+  <div class="sep"></div>
+  <div class="dropdown" id="claude-dropdown">
+    <button onclick="toggleClaudeMenu()" title="Claude Codeにスライド用データを送る">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Slides
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="dropdown-menu">
+      <button onclick="copyForClaude('HTML')">HTML スライド用にコピー</button>
+      <button onclick="copyForClaude('PPTX')">PPTX スライド用にコピー</button>
+      <button onclick="copyForClaude('PDF')">PDF スライド用にコピー</button>
+    </div>
+  </div>
   <div class="spacer"></div>
   <button onclick="centerView()" title="Center view">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-10-10h4m12 0h4"/></svg>
@@ -1344,6 +1384,58 @@ function exportJSON() {
   a.click();
   URL.revokeObjectURL(url);
   showToast('Exported as JSON');
+}
+
+// ── Claude Code Slides ──
+function toggleClaudeMenu() {
+  var dd = document.getElementById('claude-dropdown');
+  dd.classList.toggle('open');
+}
+
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('claude-dropdown');
+  if (!dd.contains(e.target)) dd.classList.remove('open');
+});
+
+function buildMapJson() {
+  var result = { version: 1, title: '', nodes: {}, rootId: 'root' };
+  var root = nodes.root;
+  if (root) result.title = root.label || 'Untitled';
+  Object.keys(nodes).forEach(function(id) {
+    var n = nodes[id];
+    result.nodes[id] = {
+      id: id,
+      label: n.label || '',
+      note: n.note || '',
+      children: n.children ? n.children.slice() : [],
+      collapsed: !!n.collapsed
+    };
+  });
+  return result;
+}
+
+function copyForClaude(format) {
+  var dd = document.getElementById('claude-dropdown');
+  dd.classList.remove('open');
+
+  var mapJson = buildMapJson();
+  var nodeCount = Object.keys(mapJson.nodes).length;
+  if (nodeCount <= 1) {
+    showToast('Nodes are empty');
+    return;
+  }
+
+  var text = '/slides\n'
+    + 'Format: ' + format + '\n\n'
+    + '```json\n'
+    + JSON.stringify(mapJson, null, 2) + '\n'
+    + '```';
+
+  navigator.clipboard.writeText(text).then(function() {
+    showToast('Copied for Claude Code (' + format + ')');
+  }).catch(function() {
+    showToast('Copy failed');
+  });
 }
 
 // ── Start ──
